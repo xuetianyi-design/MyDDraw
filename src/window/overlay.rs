@@ -138,6 +138,21 @@ pub fn client_screen_rect(hwnd: HWND) -> Result<(i32, i32, u32, u32), String> {
     ))
 }
 
+/// Clears `WS_EX_TOPMOST` from `hwnd` if set, demoting it out of the topmost Z-order band.
+pub(crate) fn clear_topmost(hwnd: HWND) {
+    if !hwnd.is_invalid() && ex_style(hwnd) as u32 & WS_EX_TOPMOST.0 != 0 {
+        let _ = set_window_pos(
+            hwnd,
+            Some(HWND_NOTOPMOST),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE,
+        );
+    }
+}
+
 /// Checks if any visible game window/dialog/dropdown/scrollbar is currently above `present`
 /// in Z-order while the game owns foreground focus, strips `WS_EX_TOPMOST` if needed, and raises
 /// `present` above it.
@@ -145,6 +160,8 @@ pub fn keep_present_on_top(owner: HWND, present: HWND) {
     if present.is_invalid() || owner.is_invalid() {
         return;
     }
+    clear_topmost(owner);
+    clear_topmost(present);
     let fg = foreground_window();
     if fg != owner && !is_related_dialog_window(owner, fg) && !is_same_process_window(fg) {
         return;
@@ -157,17 +174,7 @@ pub fn keep_present_on_top(owner: HWND, present: HWND) {
                 || is_related_dialog_window(owner, prev)
                 || is_same_process_window(prev))
         {
-            if ex_style(prev) as u32 & WS_EX_TOPMOST.0 != 0 {
-                let _ = set_window_pos(
-                    prev,
-                    Some(HWND_NOTOPMOST),
-                    0,
-                    0,
-                    0,
-                    0,
-                    SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE,
-                );
-            }
+            clear_topmost(prev);
             need_raise = true;
         }
     }
@@ -298,5 +305,45 @@ mod tests {
         destroy_window(overlay);
         destroy_window(popup);
         destroy_window(parent);
+    }
+
+    #[test]
+    fn keep_present_on_top_clears_topmost_on_owner_and_overlay() {
+        use super::{ex_style, keep_present_on_top};
+        use windows::Win32::UI::WindowsAndMessaging::WS_EX_TOPMOST;
+
+        let owner = create_window_ex_w(
+            WS_EX_TOPMOST,
+            w!("STATIC"),
+            w!("topmost-owner"),
+            WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+            0,
+            0,
+            320,
+            240,
+            None,
+            None,
+        )
+        .unwrap();
+        let overlay = create_window_ex_w(
+            WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
+            w!("STATIC"),
+            w!("topmost-overlay"),
+            WS_POPUP | WS_VISIBLE,
+            0,
+            0,
+            320,
+            240,
+            Some(owner),
+            None,
+        )
+        .unwrap();
+
+        keep_present_on_top(owner, overlay);
+        assert_eq!(ex_style(owner) as u32 & WS_EX_TOPMOST.0, 0);
+        assert_eq!(ex_style(overlay) as u32 & WS_EX_TOPMOST.0, 0);
+
+        destroy_window(overlay);
+        destroy_window(owner);
     }
 }

@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use windows::Win32::Foundation::HWND;
 
 pub(crate) use crate::win32::geometry::{client_rect, is_window};
-use crate::win32::hwnd::{kill_timer, post_message_w, set_timer};
+use crate::win32::hwnd::{kill_timer, post_message_w, set_timer, window_thread_id};
 use crate::win32::{current_thread_id, AtomicHwnd};
 pub use host::{HostWindow, PresentationMode};
 pub use overlay::OverlayWindow;
@@ -110,6 +110,14 @@ pub fn bind_window(hwnd: HWND, scaling_active: bool) -> usize {
     }
     let id = NEXT_BIND_ID.fetch_add(1, Ordering::Relaxed);
     let tid = current_thread_id();
+    let wnd_tid = window_thread_id(hwnd);
+    if crate::compat::is_logging_enabled() {
+        let cfg = crate::config::get();
+        crate::compat::log_msg(&format!(
+            "bind_window hwnd={:?} call_tid={} wnd_tid={} scaling={} devmode={} key1=0x{:X} key2=0x{:X}",
+            hwnd.0, tid, wnd_tid, scaling_active, cfg.devmode, cfg.unlock_cursor1_vk, cfg.unlock_cursor2_vk
+        ));
+    }
     ACTIVE_BIND_ID.store(id, Ordering::Relaxed);
     BOUND_HWND.store(Some(hwnd));
     BOUND_THREAD.store(tid, Ordering::Relaxed);
@@ -127,6 +135,11 @@ pub fn set_mode(width: u32, height: u32, bpp: u32, active: bool) {
     LOGICAL_BPP.store(bpp, Ordering::Relaxed);
     if BOUND_HWND.load().is_some() {
         MODE_ACTIVE.store(active, Ordering::Relaxed);
+        if active {
+            hook_logic::sync_cursor_lock();
+        } else {
+            hook_logic::unlock_cursor(false);
+        }
     }
 }
 
@@ -137,8 +150,13 @@ pub fn sync_presented_size(width: u32, height: u32) {
         LOGICAL_HEIGHT.store(height, Ordering::Relaxed);
         if LOGICAL_SCALING_ACTIVE.load(Ordering::Relaxed) {
             MODE_ACTIVE.store(true, Ordering::Relaxed);
+            hook_logic::sync_cursor_lock();
         }
     }
+}
+
+pub fn sync_cursor_lock() {
+    hook_logic::sync_cursor_lock();
 }
 
 pub fn set_scaling_active(bind_id: usize, active: bool) {
@@ -163,6 +181,7 @@ pub fn unbind_window(bind_id: usize) {
     }
     MODE_ACTIVE.store(false, Ordering::Relaxed);
     LOGICAL_SCALING_ACTIVE.store(false, Ordering::Relaxed);
+    hook_logic::reset_cursor_lock_state();
     BOUND_HWND.store(None);
     BOUND_THREAD.store(0, Ordering::Relaxed);
     hooks::uninstall_getmsg_hook();

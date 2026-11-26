@@ -103,6 +103,10 @@ fn open_log_file() -> Option<Mutex<std::fs::File>> {
         .map(Mutex::new)
 }
 
+pub fn is_logging_enabled() -> bool {
+    LOG_FILE.get_or_init(open_log_file).is_some()
+}
+
 pub fn log_msg(msg: &str) {
     let Some(file_mutex) = LOG_FILE.get_or_init(open_log_file).as_ref() else {
         return;

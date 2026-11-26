@@ -87,6 +87,7 @@ pub fn toggle_fullscreen_hotkey() {
                 renderer.sync_overlay();
             }
             let _ = display.present_locked(d);
+            window::sync_cursor_lock();
         }
     }
 }

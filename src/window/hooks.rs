@@ -374,7 +374,7 @@ unsafe extern "system" fn getmsg_hook(code: i32, wparam: WPARAM, lparam: LPARAM)
     if code >= 0 && lparam.0 != 0 {
         // SAFETY: For WH_GETMESSAGE with `code >= 0`, Win32 guarantees `lparam` points to a mutable MSG.
         let msg = unsafe { &mut *(lparam.0 as *mut MSG) };
-        hook_logic::rewrite_getmsg(msg);
+        hook_logic::rewrite_getmsg(msg, wparam.0 != 0);
     }
     let hook = HHOOK(GETMSG_HOOK.load(Ordering::Relaxed) as *mut c_void);
     // SAFETY: Forwarding to the next hook in the chain per WH_GETMESSAGE contract.

@@ -7,9 +7,11 @@ use windows::Win32::Foundation::{E_INVALIDARG, HWND, RECT};
 use windows::Win32::UI::WindowsAndMessaging::{
     GWL_EXSTYLE, GWL_STYLE, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
     WINDOWPLACEMENT, WINDOW_EX_STYLE, WINDOW_STYLE, WS_CAPTION, WS_CHILD, WS_EX_CLIENTEDGE,
-    WS_EX_DLGMODALFRAME, WS_EX_STATICEDGE, WS_EX_WINDOWEDGE, WS_MAXIMIZEBOX, WS_MINIMIZEBOX,
-    WS_OVERLAPPEDWINDOW, WS_POPUP, WS_SYSMENU, WS_THICKFRAME,
+    WS_EX_DLGMODALFRAME, WS_EX_STATICEDGE, WS_EX_TOPMOST, WS_EX_WINDOWEDGE, WS_MAXIMIZEBOX,
+    WS_MINIMIZEBOX, WS_OVERLAPPEDWINDOW, WS_POPUP, WS_SYSMENU, WS_THICKFRAME,
 };
+
+use super::overlay::clear_topmost;
 
 use crate::config::Config;
 use crate::win32::geometry::{adjust_window_rect_ex, is_window, monitor_info, window_rect};
@@ -114,8 +116,12 @@ impl HostWindow {
         let hwnd = self.hwnd.get();
         let info = monitor_info(hwnd)?;
         let rect = info.rcMonitor;
-        let edge_styles =
-            WS_EX_CLIENTEDGE.0 | WS_EX_WINDOWEDGE.0 | WS_EX_DLGMODALFRAME.0 | WS_EX_STATICEDGE.0;
+        let strip_ex_styles = WS_EX_CLIENTEDGE.0
+            | WS_EX_WINDOWEDGE.0
+            | WS_EX_DLGMODALFRAME.0
+            | WS_EX_STATICEDGE.0
+            | WS_EX_TOPMOST.0;
+        clear_topmost(hwnd);
         set_window_long(
             hwnd,
             GWL_STYLE,
@@ -124,7 +130,7 @@ impl HostWindow {
         set_window_long(
             hwnd,
             GWL_EXSTYLE,
-            (self.orig_ex_style as u32 & !edge_styles) as i32,
+            (self.orig_ex_style as u32 & !strip_ex_styles) as i32,
         )?;
         set_window_pos(
             hwnd,
@@ -150,7 +156,8 @@ impl HostWindow {
         } else {
             next_style |= WS_POPUP.0;
         }
-        let next_ex_style = self.orig_ex_style as u32;
+        clear_topmost(hwnd);
+        let next_ex_style = self.orig_ex_style as u32 & !WS_EX_TOPMOST.0;
         set_window_long(hwnd, GWL_STYLE, next_style as i32)?;
         set_window_long(hwnd, GWL_EXSTYLE, next_ex_style as i32)?;
 
@@ -271,6 +278,36 @@ mod tests {
         let restored = window_rect(hwnd).unwrap();
         assert_eq!(restored, orig_rect);
 
+        destroy_window(hwnd);
+    }
+
+    #[test]
+    fn host_window_strips_ws_ex_topmost_on_enter_and_toggle() {
+        let hwnd = create_window_ex_w(
+            WS_EX_TOPMOST,
+            w!("STATIC"),
+            w!("cnc-ddraw-topmost-test"),
+            WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+            100,
+            100,
+            640,
+            480,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_ne!(ex_style(hwnd) as u32 & WS_EX_TOPMOST.0, 0);
+
+        let cfg = Config::default();
+        let mut host =
+            HostWindow::enter(hwnd, PresentationMode::BorderlessFullscreen, 800, 600, &cfg)
+                .unwrap();
+        assert_eq!(ex_style(hwnd) as u32 & WS_EX_TOPMOST.0, 0);
+
+        host.toggle_mode(800, 600, &cfg).unwrap();
+        assert_eq!(ex_style(hwnd) as u32 & WS_EX_TOPMOST.0, 0);
+
+        host.restore().unwrap();
         destroy_window(hwnd);
     }
 }

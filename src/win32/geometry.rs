@@ -8,7 +8,7 @@ use windows::Win32::Graphics::Gdi::{
     ScreenToClient, DEVMODEW, ENUM_CURRENT_SETTINGS, MONITORINFO, MONITORINFOEXW,
     MONITOR_DEFAULTTONEAREST,
 };
-use windows::Win32::UI::Input::KeyboardAndMouse::GetCapture;
+use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, GetCapture};
 use windows::Win32::UI::WindowsAndMessaging::{
     AdjustWindowRectEx, ClipCursor, GetClientRect, GetCursorPos, GetWindowRect, IsWindow,
     SetCursorPos, WindowFromPoint, WINDOW_EX_STYLE, WINDOW_STYLE,
@@ -115,6 +115,11 @@ pub(crate) fn window_from_point(pt: POINT) -> HWND {
 pub(crate) fn get_capture() -> HWND {
     // SAFETY: GetCapture takes no arguments.
     unsafe { GetCapture() }
+}
+
+pub(crate) fn is_key_down(vk: i32) -> bool {
+    // SAFETY: GetAsyncKeyState takes a virtual-key code and returns a bitmask.
+    unsafe { GetAsyncKeyState(vk) < 0 }
 }
 
 /// Queries the current display refresh rate (Hz) of the monitor hosting `hwnd` (or primary monitor).

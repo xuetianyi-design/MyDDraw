@@ -6,6 +6,8 @@ use std::sync::OnceLock;
 use crate::win32::module_path_at;
 
 const VK_RETURN_CODE: u32 = 0x0D;
+const VK_TAB_CODE: u32 = 0x09;
+const VK_RCONTROL_CODE: u32 = 0xA3;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RendererBackend {
@@ -27,7 +29,10 @@ pub struct Config {
     pub vsync: bool,
     pub maxfps: i32,
     pub renderer: RendererBackend,
+    pub devmode: bool,
     pub toggle_fullscreen_vk: u32,
+    pub unlock_cursor1_vk: u32,
+    pub unlock_cursor2_vk: u32,
     pub singlecpu: bool,
     pub noactivateapp: bool,
     pub log: bool,
@@ -47,7 +52,10 @@ impl Default for Config {
             vsync: false,
             maxfps: 0,
             renderer: RendererBackend::Auto,
+            devmode: false,
             toggle_fullscreen_vk: VK_RETURN_CODE,
+            unlock_cursor1_vk: VK_TAB_CODE,
+            unlock_cursor2_vk: VK_RCONTROL_CODE,
             singlecpu: true,
             noactivateapp: false,
             log: false,
@@ -199,9 +207,24 @@ impl Config {
                     _ => RendererBackend::Auto,
                 };
             }
+            "devmode" => {
+                if let Some(b) = parse_bool(value) {
+                    self.devmode = b;
+                }
+            }
             "keytogglefullscreen" => {
                 if let Some(vk) = parse_u32_radix(value) {
                     self.toggle_fullscreen_vk = vk;
+                }
+            }
+            "keyunlockcursor1" => {
+                if let Some(vk) = parse_u32_radix(value) {
+                    self.unlock_cursor1_vk = vk;
+                }
+            }
+            "keyunlockcursor2" => {
+                if let Some(vk) = parse_u32_radix(value) {
+                    self.unlock_cursor2_vk = vk;
                 }
             }
             "singlecpu" => {
@@ -330,7 +353,10 @@ mod tests {
         assert_eq!(cfg.maxfps, 60);
         assert_eq!(cfg.min_frame_interval_ms(), 16);
         assert_eq!(cfg.renderer, RendererBackend::Dx12);
+        assert!(!cfg.devmode);
         assert_eq!(cfg.toggle_fullscreen_vk, 0x0D);
+        assert_eq!(cfg.unlock_cursor1_vk, 0x09);
+        assert_eq!(cfg.unlock_cursor2_vk, 0xA3);
         assert!(cfg.singlecpu);
         assert!(cfg.noactivateapp);
     }
@@ -347,7 +373,10 @@ mod tests {
         assert!(!cfg.noactivateapp);
         assert_eq!(cfg.min_frame_interval_ms(), 4);
         assert_eq!(cfg.renderer, RendererBackend::Auto);
+        assert!(!cfg.devmode);
         assert_eq!(cfg.toggle_fullscreen_vk, 0x0D);
+        assert_eq!(cfg.unlock_cursor1_vk, 0x09);
+        assert_eq!(cfg.unlock_cursor2_vk, 0xA3);
     }
 
     #[test]

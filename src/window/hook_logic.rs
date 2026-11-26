@@ -1,23 +1,26 @@
 //! Pure Rust decision logic for Win32 API hooks, `WH_GETMESSAGE`, and host WndProc subclassing.
 #![forbid(unsafe_code)]
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{BITSPIXEL, HORZRES, LOGPIXELSX, LOGPIXELSY, VERTRES};
+use windows::Win32::UI::Input::KeyboardAndMouse::{VK_CONTROL, VK_MENU, VK_RMENU};
 use windows::Win32::UI::WindowsAndMessaging::{
-    MSG, SET_WINDOW_POS_FLAGS, SM_CXSCREEN, SM_CYSCREEN, WM_ACTIVATE, WM_ACTIVATEAPP, WM_KILLFOCUS,
-    WM_LBUTTONDOWN, WM_MBUTTONDOWN, WM_MOUSEWHEEL, WM_MOVE, WM_NCACTIVATE, WM_RBUTTONDOWN, WM_SIZE,
-    WM_SYSCHAR, WM_SYSKEYDOWN, WM_TIMER, WM_WINDOWPOSCHANGED,
+    HWND_NOTOPMOST, HWND_TOPMOST, MSG, SET_WINDOW_POS_FLAGS, SM_CXSCREEN, SM_CYSCREEN, WM_ACTIVATE,
+    WM_ACTIVATEAPP, WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN,
+    WM_MBUTTONUP, WM_MOUSEWHEEL, WM_MOVE, WM_NCACTIVATE, WM_NULL, WM_RBUTTONDOWN, WM_RBUTTONUP,
+    WM_SIZE, WM_SYSCHAR, WM_SYSKEYDOWN, WM_TIMER, WM_WINDOWPOSCHANGED,
 };
 
 use crate::config;
 use crate::win32::geometry::{
-    client_to_screen, clip_cursor, cursor_pos, get_capture, map_rect, screen_to_client,
-    set_cursor_pos, window_from_point, window_rect,
+    client_rect, client_to_screen, clip_cursor, cursor_pos, get_capture, is_key_down, map_rect,
+    screen_to_client, set_cursor_pos, window_from_point, window_rect,
 };
 use crate::win32::hwnd::{
-    bring_window_to_top, desktop_window, kill_timer, move_window, set_window_pos,
+    bring_window_to_top, desktop_window, foreground_window, is_iconic, kill_timer, move_window,
+    set_window_pos,
 };
 
 use super::input::{
@@ -26,9 +29,155 @@ use super::input::{
 };
 use super::overlay::ensure_present_on_top_if_active;
 use super::{
-    bound_hwnd, is_present_hwnd, is_scaling_active, logical_mode, present_hwnd, FLUSH_TIMER_ID,
-    WM_APP_FLUSH,
+    bound_hwnd, compute_viewport, is_present_hwnd, is_scaling_active, logical_mode, present_hwnd,
+    FLUSH_TIMER_ID, WM_APP_FLUSH,
 };
+
+static CURSOR_LOCKED: AtomicBool = AtomicBool::new(false);
+static CURSOR_MANUALLY_UNLOCKED: AtomicBool = AtomicBool::new(false);
+static LAST_CLIP_RECT: [AtomicI32; 4] = [
+    AtomicI32::new(0),
+    AtomicI32::new(0),
+    AtomicI32::new(0),
+    AtomicI32::new(0),
+];
+
+fn same_last_clip_rect(rc: RECT) -> bool {
+    LAST_CLIP_RECT[0].load(Ordering::Relaxed) == rc.left
+        && LAST_CLIP_RECT[1].load(Ordering::Relaxed) == rc.top
+        && LAST_CLIP_RECT[2].load(Ordering::Relaxed) == rc.right
+        && LAST_CLIP_RECT[3].load(Ordering::Relaxed) == rc.bottom
+}
+
+fn store_last_clip_rect(rc: RECT) {
+    LAST_CLIP_RECT[0].store(rc.left, Ordering::Relaxed);
+    LAST_CLIP_RECT[1].store(rc.top, Ordering::Relaxed);
+    LAST_CLIP_RECT[2].store(rc.right, Ordering::Relaxed);
+    LAST_CLIP_RECT[3].store(rc.bottom, Ordering::Relaxed);
+}
+
+fn viewport_screen_rect(bound: HWND, lw: u32, lh: u32) -> Option<RECT> {
+    let client = client_rect(bound).ok()?;
+    if client.right <= 0 || client.bottom <= 0 {
+        return None;
+    }
+    let (vx, vy, vw, vh) = compute_viewport(
+        lw,
+        lh,
+        client.right as u32,
+        client.bottom as u32,
+        config::get().maintas,
+    );
+    let rc = RECT {
+        left: vx as i32,
+        top: vy as i32,
+        right: (vx + vw) as i32,
+        bottom: (vy + vh) as i32,
+    };
+    Some(map_rect(Some(bound), None, rc))
+}
+
+pub(super) fn sync_cursor_lock() {
+    if config::get().devmode || CURSOR_MANUALLY_UNLOCKED.load(Ordering::Relaxed) {
+        return;
+    }
+    let Some((bound, w, h, _)) = logical_mode() else {
+        return;
+    };
+    let fg = foreground_window();
+    if is_iconic(bound) || fg != bound {
+        if crate::compat::is_logging_enabled() {
+            crate::compat::log_msg(&format!(
+                "sync_cursor_lock skipped: iconic={} fg={:?} bound={:?}",
+                is_iconic(bound),
+                fg.0,
+                bound.0
+            ));
+        }
+        return;
+    }
+    let Some(screen_rc) = viewport_screen_rect(bound, w, h) else {
+        return;
+    };
+    if CURSOR_LOCKED.load(Ordering::Relaxed) && same_last_clip_rect(screen_rc) {
+        return;
+    }
+    let ok = clip_cursor(Some(&screen_rc));
+    if crate::compat::is_logging_enabled() {
+        crate::compat::log_msg(&format!(
+            "sync_cursor_lock clip_cursor({},{},{},{}) -> {}",
+            screen_rc.left, screen_rc.top, screen_rc.right, screen_rc.bottom, ok
+        ));
+    }
+    if ok {
+        store_last_clip_rect(screen_rc);
+        CURSOR_LOCKED.store(true, Ordering::Relaxed);
+    }
+}
+
+pub(super) fn unlock_cursor(manual: bool) {
+    if manual {
+        CURSOR_MANUALLY_UNLOCKED.store(true, Ordering::Relaxed);
+    }
+    let was_locked = CURSOR_LOCKED.swap(false, Ordering::Relaxed);
+    if was_locked || manual {
+        let ok = clip_cursor(None);
+        if crate::compat::is_logging_enabled() {
+            crate::compat::log_msg(&format!(
+                "unlock_cursor(manual={manual}) was_locked={was_locked} clip_cursor(None) -> {ok}"
+            ));
+        }
+    }
+}
+
+pub(super) fn reset_cursor_lock_state() {
+    CURSOR_MANUALLY_UNLOCKED.store(false, Ordering::Relaxed);
+    if CURSOR_LOCKED.swap(false, Ordering::Relaxed) {
+        let _ = clip_cursor(None);
+    }
+}
+
+pub(super) fn toggle_cursor_lock() {
+    if config::get().devmode {
+        return;
+    }
+    let was_unlocked = CURSOR_MANUALLY_UNLOCKED.load(Ordering::Relaxed);
+    if crate::compat::is_logging_enabled() {
+        crate::compat::log_msg(&format!("toggle_cursor_lock was_unlocked={was_unlocked}"));
+    }
+    if was_unlocked {
+        CURSOR_MANUALLY_UNLOCKED.store(false, Ordering::Relaxed);
+        sync_cursor_lock();
+    } else {
+        unlock_cursor(true);
+    }
+}
+
+fn maybe_relock_on_client_mouse_up() {
+    if !config::get().devmode && CURSOR_MANUALLY_UNLOCKED.load(Ordering::Relaxed) {
+        CURSOR_MANUALLY_UNLOCKED.store(false, Ordering::Relaxed);
+        sync_cursor_lock();
+    }
+}
+
+fn is_unlock_hotkey_pressed(vk: u32) -> bool {
+    let cfg = config::get();
+    if cfg.unlock_cursor1_vk != 0
+        && (vk == cfg.unlock_cursor1_vk || vk == VK_CONTROL.0 as u32)
+        && is_key_down(VK_CONTROL.0 as i32)
+        && is_key_down(cfg.unlock_cursor1_vk as i32)
+    {
+        return true;
+    }
+    if cfg.unlock_cursor2_vk != 0
+        && (vk == cfg.unlock_cursor2_vk || vk == VK_MENU.0 as u32)
+        && is_key_down(VK_RMENU.0 as i32)
+        && is_key_down(cfg.unlock_cursor2_vk as i32)
+    {
+        return true;
+    }
+    false
+}
 
 pub(super) fn virtual_window_rect(hwnd: HWND, include_dialogs: bool) -> Option<RECT> {
     let (bound, w, h, _) = logical_mode()?;
@@ -102,7 +251,18 @@ pub(super) fn set_virtual_cursor_pos(x: i32, y: i32) -> bool {
 }
 
 pub(super) fn clip_virtual_cursor(rect: Option<&RECT>) -> bool {
-    if let (Some((bound, w, h, _)), Some(r)) = (logical_mode(), rect) {
+    let devmode = config::get().devmode;
+    if !devmode && CURSOR_MANUALLY_UNLOCKED.load(Ordering::Relaxed) {
+        return true;
+    }
+    if let Some((bound, w, h, _)) = logical_mode() {
+        let Some(r) = rect else {
+            if !devmode {
+                sync_cursor_lock();
+                return true;
+            }
+            return clip_cursor(None);
+        };
         let (l, t) = logical_to_client(bound, r.left, r.top, w, h);
         let (ri, b) = logical_to_client(
             bound,
@@ -121,9 +281,18 @@ pub(super) fn clip_virtual_cursor(rect: Option<&RECT>) -> bool {
                 bottom: b + 1,
             },
         );
-        return clip_cursor(Some(&mapped));
+        let ok = clip_cursor(Some(&mapped));
+        if ok {
+            store_last_clip_rect(mapped);
+            CURSOR_LOCKED.store(true, Ordering::Relaxed);
+        }
+        return ok;
     }
-    clip_cursor(rect)
+    let ok = clip_cursor(rect);
+    if ok {
+        CURSOR_LOCKED.store(rect.is_some(), Ordering::Relaxed);
+    }
+    ok
 }
 
 pub(super) fn virtual_clip_cursor() -> Option<RECT> {
@@ -155,9 +324,16 @@ pub(super) fn handle_set_window_pos(
     if is_scaling_active() && bound_hwnd() == Some(hwnd) {
         return true;
     }
+    let effective_insert_after = if insert_after == HWND_TOPMOST
+        && bound_hwnd().is_some_and(|b| hwnd == b || is_related_dialog_window(b, hwnd))
+    {
+        HWND_NOTOPMOST
+    } else {
+        insert_after
+    };
     let ok = set_window_pos(
         hwnd,
-        Some(insert_after),
+        Some(effective_insert_after),
         x,
         y,
         cx,
@@ -214,7 +390,25 @@ pub(super) fn virtual_device_caps(index: i32) -> Option<i32> {
     None
 }
 
-pub(super) fn rewrite_getmsg(msg: &mut MSG) {
+pub(super) fn rewrite_getmsg(msg: &mut MSG, pm_remove: bool) {
+    if pm_remove && matches!(msg.message, WM_KEYDOWN | WM_SYSKEYDOWN) {
+        let was_down = (msg.lParam.0 as u32) & (1 << 30) != 0;
+        let vk = msg.wParam.0 as u32;
+        let cfg = config::get();
+        if !was_down && !cfg.devmode && is_unlock_hotkey_pressed(vk) {
+            if crate::compat::is_logging_enabled() {
+                crate::compat::log_msg(&format!(
+                    "getmsg unlock hotkey vk=0x{:X} ctrl={} rmenu={}",
+                    vk,
+                    is_key_down(VK_CONTROL.0 as i32),
+                    is_key_down(VK_RMENU.0 as i32)
+                ));
+            }
+            toggle_cursor_lock();
+            msg.message = WM_NULL;
+            return;
+        }
+    }
     let Some((bound, w, h, _)) = logical_mode() else {
         return;
     };
@@ -233,6 +427,9 @@ pub(super) fn rewrite_getmsg(msg: &mut MSG) {
     msg.pt = POINT { x: lx, y: ly };
     if !is_mouse_message(msg.message) {
         return;
+    }
+    if matches!(msg.message, WM_LBUTTONUP | WM_RBUTTONUP | WM_MBUTTONUP) {
+        maybe_relock_on_client_mouse_up();
     }
     if matches!(
         msg.message,
@@ -310,9 +507,10 @@ pub(super) fn handle_subclass_message(
     }
     if msg == WM_ACTIVATEAPP {
         if wparam.0 == 0 {
-            let _ = clip_cursor(None);
+            unlock_cursor(false);
         } else {
             crate::draw::on_host_window_changed();
+            sync_cursor_lock();
         }
         if shield_focus {
             if !activateapp_passed.swap(true, Ordering::Relaxed) && wparam.0 != 0 {
@@ -324,10 +522,14 @@ pub(super) fn handle_subclass_message(
     }
     if matches!(msg, WM_MOVE | WM_SIZE | WM_WINDOWPOSCHANGED) && bound_hwnd() == Some(hwnd) {
         crate::draw::on_host_window_changed();
+        sync_cursor_lock();
     }
     // Only remap physical coordinates on `bound` when no owned presentation overlay exists;
     // when `PRESENT_HWND` is active, `present_wndproc` and `getmsg_hook` deliver logical coords.
     if is_mouse_message(msg) && present_hwnd().is_none() {
+        if matches!(msg, WM_LBUTTONUP | WM_RBUTTONUP | WM_MBUTTONUP) {
+            maybe_relock_on_client_mouse_up();
+        }
         if let Some((bound, w, h, _)) = logical_mode() {
             if hwnd == bound {
                 let raw = lparam.0 as u32;
@@ -346,4 +548,24 @@ pub(super) fn handle_subclass_message(
         }
     }
     SubclassAction::Forward(lparam)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn toggle_cursor_lock_flips_manual_unlock_flag() {
+        reset_cursor_lock_state();
+        assert!(!CURSOR_MANUALLY_UNLOCKED.load(Ordering::Relaxed));
+
+        toggle_cursor_lock();
+        assert!(CURSOR_MANUALLY_UNLOCKED.load(Ordering::Relaxed));
+        assert!(!CURSOR_LOCKED.load(Ordering::Relaxed));
+
+        toggle_cursor_lock();
+        assert!(!CURSOR_MANUALLY_UNLOCKED.load(Ordering::Relaxed));
+
+        reset_cursor_lock_state();
+    }
 }

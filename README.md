@@ -39,7 +39,10 @@ maintas=true             ; preserve aspect ratio (false = stretch to fill window
 vsync=false              ; true = Fifo vsync, false = low-latency Mailbox/Immediate
 maxfps=0                 ; 0 = coalesced ~250 Hz cap, >0 = explicit FPS cap
 renderer=auto            ; auto, dx12, or vulkan (overridden by WGPU_BACKEND env var)
+devmode=false            ; true = disable automatic cursor locking inside the window
 keytogglefullscreen=0x0D ; Alt+key toggle between borderless fullscreen and windowed (0 = off)
+keyunlockcursor1=0x09    ; Ctrl+key toggle cursor lock (default Tab, 0 = off)
+keyunlockcursor2=0xA3    ; RightAlt+key toggle cursor lock (default Right Ctrl, 0 = off)
 singlecpu=true           ; pin game-directory threads to CPU0 to prevent multi-core engine freezes
 noactivateapp=false      ; shield focus deactivation messages (auto-enabled for RA2/TS presets)
 log=false                ; write diagnostic events to cnc-ddraw.log (or set CNC_DDRAW_LOG=path)
