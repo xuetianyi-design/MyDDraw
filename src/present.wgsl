@@ -22,10 +22,9 @@ fn vs(@builtin(vertex_index) index: u32) -> Vertex {
 @group(0) @binding(1) var lut: texture_2d<f32>;
 @group(0) @binding(2) var<uniform> params: Params;
 
-@fragment
-fn fs(input: Vertex) -> @location(0) vec4<f32> {
+fn sample_rgba(coord: vec2<i32>) -> vec4<f32> {
     let size = vec2<i32>(textureDimensions(raw_frame));
-    let pixel = clamp(vec2<i32>(input.uv * vec2<f32>(size)), vec2<i32>(0), size - vec2<i32>(1));
+    let pixel = clamp(coord, vec2<i32>(0), size - vec2<i32>(1));
     let raw = textureLoad(raw_frame, pixel, 0).r;
 
     if params.format == 0u {
@@ -57,4 +56,29 @@ fn fs(input: Vertex) -> @location(0) vec4<f32> {
     let g_out = textureLoad(lut, vec2<i32>(i32(g), 0), 0).g;
     let b_out = textureLoad(lut, vec2<i32>(i32(b), 0), 0).b;
     return vec4<f32>(r_out, g_out, b_out, 1.0);
+}
+
+@fragment
+fn fs(input: Vertex) -> @location(0) vec4<f32> {
+    let size = vec2<f32>(textureDimensions(raw_frame));
+    let texel_pos = input.uv * size;
+
+    // Sharp-Bilinear: keep pixel interiors crisp and only anti-alias the
+    // sub-pixel transition band when scaling by a non-integer factor.
+    let texel_per_pixel = max(fwidth(texel_pos), vec2<f32>(1e-5));
+    let scale = vec2<f32>(1.0) / texel_per_pixel;
+
+    let p = texel_pos - vec2<f32>(0.5);
+    let base = vec2<i32>(floor(p));
+    let f = fract(p);
+    let w = clamp((f - vec2<f32>(0.5)) * scale + vec2<f32>(0.5), vec2<f32>(0.0), vec2<f32>(1.0));
+
+    let c00 = sample_rgba(base);
+    let c10 = sample_rgba(base + vec2<i32>(1, 0));
+    let c01 = sample_rgba(base + vec2<i32>(0, 1));
+    let c11 = sample_rgba(base + vec2<i32>(1, 1));
+
+    let top = mix(c00, c10, w.x);
+    let bot = mix(c01, c11, w.x);
+    return mix(top, bot, w.y);
 }
